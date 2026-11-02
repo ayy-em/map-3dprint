@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+
+import numpy as np
 
 from manifold3d import Manifold
 from shapely import affinity
@@ -10,7 +13,7 @@ from shapely.geometry import Point, Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from .geometry import extrude, fit_text, polygons_of, rounded_rect, union
+from .geometry import extrude, fit_text, polygons_of, union
 from .osm import MapFeatures
 
 
@@ -33,6 +36,7 @@ class Options:
     railways: bool = True
     rail_height: float = 0.8
     min_rail_width: float = 0.8
+    shape: str = "square"          # square | circle | hexagon | heart
     frame: bool = True
     border_radius: float = 6.0
     frame_width: float = 8.0
@@ -71,6 +75,42 @@ def _clean(geom: BaseGeometry, min_area: float = 0.2, simplify: float = 0.05) ->
     return unary_union([p for p in polygons_of(geom) if p.area >= min_area])
 
 
+def tile_outline(opts: Options) -> Polygon:
+    """Outline of the map tile, centred on the origin, fitting a `size` x `size` box."""
+    h = opts.size / 2
+    match opts.shape:
+        case "square":
+            return box(-h, -h, h, h)
+        case "circle":
+            return Point(0, 0).buffer(h, quad_segs=64)
+        case "hexagon":  # flat top/bottom, corner-to-corner = size
+            return Polygon([(h * math.cos(math.radians(a)), h * math.sin(math.radians(a)))
+                            for a in range(0, 360, 60)])
+        case "heart":
+            t = np.linspace(0, 2 * math.pi, 241)[:-1]
+            x = 16 * np.sin(t) ** 3
+            y = 13 * np.cos(t) - 5 * np.cos(2 * t) - 2 * np.cos(3 * t) - np.cos(4 * t)
+            poly = Polygon(np.column_stack([x, y]))
+            minx, miny, maxx, maxy = poly.bounds
+            k = opts.size / max(maxx - minx, maxy - miny)
+            return affinity.translate(affinity.scale(poly, k, k, origin=(0, 0)),
+                                      -(minx + maxx) / 2 * k, -(miny + maxy) / 2 * k)
+    raise ValueError(f"unknown shape {opts.shape!r}")
+
+
+def _join(opts: Options) -> str:
+    """Sharp joins keep polygon corners crisp; curved shapes need round joins (no cusp spikes)."""
+    return "mitre" if opts.shape in ("square", "hexagon") else "round"
+
+
+def inset(poly: BaseGeometry, d: float, join: str = "mitre") -> BaseGeometry:
+    return poly.buffer(-d, join_style=join) if d else poly
+
+
+def round_corners(poly: BaseGeometry, r: float) -> BaseGeometry:
+    return poly.buffer(-r, join_style="mitre").buffer(r, quad_segs=16) if r > 0 else poly
+
+
 def _building_groups(buildings, opts: Options) -> dict[float, BaseGeometry]:
     """Group building footprints (scaled to mm) by printed height, quantised to 0.2 mm."""
     s = opts.mm_per_m
@@ -106,9 +146,9 @@ def pin_outline(opts: Options) -> tuple[BaseGeometry, BaseGeometry]:
 
 def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
     s = opts.mm_per_m
-    half = opts.size / 2
+    outline = tile_outline(opts)
     margin = opts.frame_overlap if opts.frame else 0.6
-    inner = box(-half + margin, -half + margin, half - margin, half - margin)
+    inner = inset(outline, margin, _join(opts))
 
     roads = _scaled_lines(feats.roads, s, opts.min_road_width)
     paths = unary_union([_scaled_lines(feats.paths, s, opts.min_path_width),
@@ -136,7 +176,7 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
     rails = rails.difference(buildings)
     parks = _clean(parks.difference(unary_union([roads, paths, buildings, water, rails])))
 
-    plate = rounded_rect(-half, -half, half, half, 0 if opts.frame else opts.border_radius)
+    plate = outline if opts.frame else round_corners(outline, opts.border_radius)
     base = extrude(plate, 0, opts.base_height)
     if not water.is_empty and opts.water_depth > 0:
         depth = min(opts.water_depth, opts.base_height - 0.4)
@@ -164,19 +204,29 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
 
 def build_frame(opts: Options, label: str | None) -> dict[str, Manifold]:
     """A bezel that lies on top of the map tile, covering `frame_overlap` mm of its edge."""
-    half_open = opts.size / 2 - opts.frame_overlap
     fw = opts.frame_width
-    bottom = opts.text_strip if (opts.text and label) else fw
-    outer = rounded_rect(-half_open - fw, -half_open - bottom, half_open + fw, half_open + fw,
-                         opts.border_radius)
-    opening = box(-half_open, -half_open, half_open, half_open)
+    opening = inset(tile_outline(opts), opts.frame_overlap, _join(opts))
+    minx, miny, maxx, _ = opening.bounds
+    has_text = opts.text and bool(label)
+    outer = opening.buffer(fw, join_style=_join(opts))
+    if not has_text:
+        text_box = None
+    elif opts.shape == "square":  # widen the bottom edge into a text strip
+        outer = unary_union([outer, box(minx - fw, miny - opts.text_strip, maxx + fw, miny)])
+        text_box = (maxx - minx - 4, opts.text_strip * 0.62, miny - opts.text_strip / 2)
+    else:  # hang a plaque below the shape
+        pw, ph = 0.75 * opts.size, opts.text_strip * 0.75
+        top = miny - fw / 2
+        outer = unary_union([outer, box(-pw / 2, top - fw / 2 - ph, pw / 2, top)])
+        text_box = (pw - 6, ph * 0.62, top - fw / 2 - ph / 2)
+    outer = round_corners(outer, opts.border_radius)
     t = opts.frame_thickness
     body = extrude(outer.difference(opening), 0, t)
-    if not (opts.text and label):
+    if text_box is None:
         return {"frame": body}
 
-    txt = fit_text(label, 2 * half_open - 4, bottom * 0.62)
-    txt = affinity.translate(txt, 0, -half_open - bottom / 2)
+    max_w, max_h, cy = text_box
+    txt = affinity.translate(fit_text(label, max_w, max_h), 0, cy)
     depth = min(opts.text_height, t - 0.6)  # keep >= 0.6 mm of floor under a recess
     match opts.text_style:
         case "emboss":  # raised letters on top of the frame

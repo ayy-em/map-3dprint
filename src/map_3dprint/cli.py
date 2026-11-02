@@ -40,6 +40,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     g = p.add_argument_group("map")
     g.add_argument("--size", type=float, default=d.size, help="Map tile side length, mm")
+    g.add_argument("--shape", choices=("square", "circle", "hexagon", "heart"), default=d.shape,
+                   help="Outline of the map tile (the frame follows it)")
     g.add_argument("--radius", type=float, default=d.radius,
                    help="Real-world distance from centre to tile edge, metres")
     g.add_argument("--base-height", type=float, default=d.base_height, help="Base plate thickness, mm")

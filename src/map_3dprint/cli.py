@@ -10,6 +10,7 @@ import unicodedata
 from pathlib import Path
 
 from .geometry import write_3mf, write_stl
+from .preview import render_preview
 from .model import Options, Overlay, build_frame, build_map, build_stand, describe_scale, merged
 from shapely.geometry import LineString
 
@@ -118,6 +119,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--format", choices=("both", "3mf", "stl"), default="both",
                    help="3MF keeps each layer as a coloured part of one object, ready for multi-colour "
                         "printing; STL is single-part meshes")
+    p.add_argument("--preview", action=argparse.BooleanOptionalAction, default=True,
+                   help="Also save a coloured top-down PNG preview of the assembled result")
     p.add_argument("--split", action="store_true",
                    help="Also write each layer (base, roads, paths, buildings, pin, text) as its own STL")
     return p.parse_args(argv)
@@ -185,18 +188,22 @@ def main(argv: list[str] | None = None) -> None:
             split = a.split or (piece == "frame" and opts.text_style == "flush" and "text" in parts)
             if split and len(parts) > 1:
                 written += [_save(m, out / f"{name}-{piece}-{k}.stl") for k, m in parts.items()]
+    coloured = {piece: {k: (m, COLORS.get(k, "#808080")) for k, m in parts.items()}
+                for piece, parts in pieces.items()}
+    stand_offset = (0.0, -opts.size / 2 - opts.text_strip - 40)
     if want_3mf:
-        coloured = {piece: {k: (m, COLORS.get(k, "#808080")) for k, m in parts.items()}
-                    for piece, parts in pieces.items()}
-        # Place the frame next to the tile so both fit on the plate preview without overlapping.
-        offsets = {"frame": (opts.size + 2 * opts.frame_width + 10, 0.0),
-                   "stand": (0.0, -opts.size / 2 - opts.text_strip - 40)}
+        # Place the frame next to the tile so both fit on the plate without overlapping.
+        offsets = {"frame": (opts.size + 2 * opts.frame_width + 10, 0.0), "stand": stand_offset}
         path = out / f"{name}.3mf"
         written.append((path, write_3mf(coloured, path, offsets)))
+    if a.preview:
+        # Assembled view: the frame sits on the tile, as it will once glued.
+        path = render_preview(coloured, out / f"{name}-preview.png", {"stand": stand_offset})
+        written.append((path, None))
 
     print(f"Done in {time.perf_counter() - t0:.1f}s:")
     for path, ntri in written:
-        print(f"  {path}  ({ntri:,} triangles)")
+        print(f"  {path}" + (f"  ({ntri:,} triangles)" if ntri is not None else ""))
 
 
 def _save(mesh, path: Path) -> tuple[Path, int]:

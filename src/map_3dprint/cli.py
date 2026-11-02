@@ -9,9 +9,15 @@ import time
 import unicodedata
 from pathlib import Path
 
-from .geometry import write_stl
+from .geometry import write_3mf, write_stl
 from .model import Options, build_frame, build_map, describe_scale, merged
 from .osm import Location, fetch_features, geocode
+
+# Display colours for the 3MF parts (slicers show these; assign filaments per part).
+COLORS = {
+    "base": "#2B2B2B", "roads": "#F2F2F2", "paths": "#A8A8A8", "buildings": "#E0B04A",
+    "pin": "#D7263D", "frame": "#2B2B2B", "text": "#F2F2F2",
+}
 
 
 def slugify(text: str) -> str:
@@ -58,15 +64,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="How far the frame covers the tile edge, mm")
     g.add_argument("--frame-thickness", type=float, default=d.frame_thickness, help="Frame thickness, mm")
     g.add_argument("--text", action=argparse.BooleanOptionalAction, default=d.text,
-                   help="Emboss the address text on the frame")
+                   help="Put the address text on the frame")
     g.add_argument("--label", help="Custom frame text (default: the address as given)")
     g.add_argument("--text-strip", type=float, default=d.text_strip,
                    help="Height of the frame's bottom text strip, mm")
-    g.add_argument("--text-height", type=float, default=d.text_height, help="Text relief height, mm")
+    g.add_argument("--text-style", choices=("emboss", "deboss", "flush"), default=d.text_style,
+                   help="emboss = raised letters, deboss = carved in, flush = separate inlay part level "
+                        "with the surface (for a second colour; use 3MF or --split)")
+    g.add_argument("--text-height", type=float, default=d.text_height,
+                   help="Text relief height (emboss) or depth (deboss/flush), mm")
 
+    p.add_argument("--format", choices=("both", "3mf", "stl"), default="both",
+                   help="3MF keeps each layer as a coloured part of one object, ready for multi-colour "
+                        "printing; STL is single-part meshes")
     p.add_argument("--split", action="store_true",
-                   help="Also write each layer (base, roads, paths, buildings, pin, text) as its own STL, "
-                        "for multi-colour printing")
+                   help="Also write each layer (base, roads, paths, buildings, pin, text) as its own STL")
     return p.parse_args(argv)
 
 
@@ -94,20 +106,29 @@ def main(argv: list[str] | None = None) -> None:
 
     name = a.name or slugify(a.address)
     out: Path = a.out_dir
+    want_stl, want_3mf = a.format in ("both", "stl"), a.format in ("both", "3mf")
     written = []
 
     print("Building map tile ...")
-    map_parts = build_map(feats, opts)
-    written.append(_save(merged(map_parts), out / f"{name}-map.stl"))
-    if a.split:
-        written += [_save(m, out / f"{name}-map-{k}.stl") for k, m in map_parts.items()]
-
+    pieces = {"map": build_map(feats, opts)}
     if opts.frame:
         print("Building frame ...")
-        frame_parts = build_frame(opts, a.label or a.address)
-        written.append(_save(merged(frame_parts), out / f"{name}-frame.stl"))
-        if a.split and "text" in frame_parts:
-            written += [_save(m, out / f"{name}-frame-{k}.stl") for k, m in frame_parts.items()]
+        pieces["frame"] = build_frame(opts, a.label or a.address)
+
+    if want_stl:
+        for piece, parts in pieces.items():
+            written.append(_save(merged(parts), out / f"{name}-{piece}.stl"))
+            # A flush inlay is invisible once merged, so always split it out for STL.
+            split = a.split or (piece == "frame" and opts.text_style == "flush" and "text" in parts)
+            if split and len(parts) > 1:
+                written += [_save(m, out / f"{name}-{piece}-{k}.stl") for k, m in parts.items()]
+    if want_3mf:
+        coloured = {piece: {k: (m, COLORS.get(k, "#808080")) for k, m in parts.items()}
+                    for piece, parts in pieces.items()}
+        # Place the frame next to the tile so both fit on the plate preview without overlapping.
+        offsets = {"frame": (opts.size + 2 * opts.frame_width + 10, 0.0)}
+        path = out / f"{name}.3mf"
+        written.append((path, write_3mf(coloured, path, offsets)))
 
     print(f"Done in {time.perf_counter() - t0:.1f}s:")
     for path, ntri in written:

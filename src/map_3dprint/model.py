@@ -32,7 +32,8 @@ class Options:
     frame_thickness: float = 2.0
     text: bool = True
     text_strip: float = 24.0
-    text_height: float = 0.8
+    text_height: float = 0.8       # relief height (emboss) or depth (deboss/flush)
+    text_style: str = "emboss"     # emboss | deboss | flush
     pin: bool = False
     pin_size: float = 16.0         # pin head diameter, mm
 
@@ -134,15 +135,23 @@ def build_frame(opts: Options, label: str | None) -> dict[str, Manifold]:
     outer = rounded_rect(-half_open - fw, -half_open - bottom, half_open + fw, half_open + fw,
                          opts.border_radius)
     opening = box(-half_open, -half_open, half_open, half_open)
-    parts = {"frame": extrude(outer.difference(opening), 0, opts.frame_thickness)}
+    t = opts.frame_thickness
+    body = extrude(outer.difference(opening), 0, t)
+    if not (opts.text and label):
+        return {"frame": body}
 
-    if opts.text and label:
-        max_w = 2 * half_open - 4
-        max_h = bottom * 0.62
-        txt = fit_text(label, max_w, max_h)
-        txt = affinity.translate(txt, 0, -half_open - bottom / 2)
-        parts["text"] = extrude(txt, opts.frame_thickness, opts.text_height)
-    return parts
+    txt = fit_text(label, 2 * half_open - 4, bottom * 0.62)
+    txt = affinity.translate(txt, 0, -half_open - bottom / 2)
+    depth = min(opts.text_height, t - 0.6)  # keep >= 0.6 mm of floor under a recess
+    match opts.text_style:
+        case "emboss":  # raised letters on top of the frame
+            return {"frame": body, "text": extrude(txt, t, opts.text_height)}
+        case "deboss":  # letters carved into the frame
+            return {"frame": body - extrude(txt, t - depth, depth + 1)}
+        case "flush":  # letters inlaid level with the surface: a separate part filling a pocket
+            return {"frame": body - extrude(txt, t - depth, depth + 1),
+                    "text": extrude(txt, t - depth, depth)}
+    raise ValueError(f"unknown text style {opts.text_style!r}")
 
 
 def merged(parts: dict[str, Manifold]) -> Manifold:

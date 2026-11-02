@@ -114,3 +114,75 @@ def write_stl(mesh: Manifold, path: Path, name: str = "map-3dprint") -> int:
         f.write(np.uint32(len(tris)).tobytes())
         f.write(rec.tobytes())
     return len(tris)
+
+
+# ----------------------------------------------------------------------------- 3MF
+
+_3MF_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+ <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+ <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+</Types>"""
+_RELS = """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>"""
+
+
+def _mesh_xml(mesh: Manifold) -> str:
+    m = mesh.to_mesh()
+    verts = np.asarray(m.vert_properties, dtype=np.float64)[:, :3]
+    tris = np.asarray(m.tri_verts, dtype=np.int64)
+    vx = "".join(f'<vertex x="{x:.4f}" y="{y:.4f}" z="{z:.4f}"/>' for x, y, z in verts)
+    tx = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in tris)
+    return f"<mesh><vertices>{vx}</vertices><triangles>{tx}</triangles></mesh>"
+
+
+def write_3mf(pieces: dict[str, dict[str, tuple[Manifold, str]]], path: Path,
+              offsets: dict[str, tuple[float, float]] | None = None) -> int:
+    """Write a 3MF where every piece (e.g. map, frame) is one multi-part object.
+
+    `pieces` maps piece name -> {part name: (mesh, "#RRGGBB")}. Each part becomes its own mesh
+    object with a display colour; a component object groups the parts of a piece so slicers
+    keep them aligned and let you assign a filament per part. Returns total triangle count.
+    """
+    import zipfile
+    from xml.sax.saxutils import quoteattr
+
+    offsets = offsets or {}
+    colors: list[str] = []
+    res, build, next_id, ntri = [], [], 2, 0
+    for piece, parts in pieces.items():
+        comp_ids = []
+        for part, (mesh, color) in parts.items():
+            if mesh.is_empty():
+                continue
+            if color not in colors:
+                colors.append(color)
+            res.append(f'<object id="{next_id}" type="model" name={quoteattr(f"{piece}-{part}")} '
+                       f'pid="1" pindex="{colors.index(color)}">{_mesh_xml(mesh)}</object>')
+            comp_ids.append(next_id)
+            ntri += mesh.num_tri()
+            next_id += 1
+        if not comp_ids:
+            continue
+        comps = "".join(f'<component objectid="{i}"/>' for i in comp_ids)
+        res.append(f'<object id="{next_id}" type="model" name={quoteattr(piece)}>'
+                   f'<components>{comps}</components></object>')
+        dx, dy = offsets.get(piece, (0.0, 0.0))
+        build.append(f'<item objectid="{next_id}" transform="1 0 0 0 1 0 0 0 1 {dx:.3f} {dy:.3f} 0"/>')
+        next_id += 1
+
+    mats = "".join(f'<base name="{c}" displaycolor="{c}FF"/>' for c in colors)
+    model = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+             f'<model unit="millimeter" xml:lang="en-US" xmlns="{_3MF_NS}">'
+             f'<metadata name="Application">map-3dprint</metadata>'
+             f'<resources><basematerials id="1">{mats}</basematerials>{"".join(res)}</resources>'
+             f'<build>{"".join(build)}</build></model>')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        z.writestr("_rels/.rels", _RELS)
+        z.writestr("3D/3dmodel.model", model)
+    return ntri

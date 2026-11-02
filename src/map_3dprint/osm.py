@@ -88,6 +88,38 @@ def geocode(address: str) -> Location:
     return Location(float(hit["lat"]), float(hit["lon"]), hit.get("display_name", address))
 
 
+ROUTING_URL = "https://routing.openstreetmap.de/routed-{profile}/route/v1/driving/{coords}"
+ROUTE_PROFILES = {"walk": "foot", "bike": "bike", "drive": "car"}
+
+
+def route(points: list[Location], mode: str) -> list[tuple[float, float]]:
+    """(lat, lon) polyline through `points` in order; straight segments for mode 'straight'."""
+    if mode == "straight":
+        return [(p.lat, p.lon) for p in points]
+    coords = ";".join(f"{p.lon:.6f},{p.lat:.6f}" for p in points)
+    url = ROUTING_URL.format(profile=ROUTE_PROFILES[mode], coords=coords)
+
+    def fetch():
+        r = requests.get(url, params={"overview": "full", "geometries": "geojson"},
+                         headers={"User-Agent": USER_AGENT}, timeout=(15, 60))
+        r.raise_for_status()
+        return r.json()
+
+    data = _cached_request(f"route:{url}", fetch)
+    if data.get("code") != "Ok" or not data.get("routes"):
+        raise SystemExit(f"Routing failed: {data.get('message', data.get('code'))}")
+    return [(lat, lon) for lon, lat in data["routes"][0]["geometry"]["coordinates"]]
+
+
+def locate(text: str) -> Location:
+    """Geocode an address, or parse a literal 'lat,lon'."""
+    try:
+        lat, lon = (float(x) for x in text.split(","))
+        return Location(lat, lon, text)
+    except ValueError:
+        return geocode(text)
+
+
 class Projector:
     """Local equirectangular projection: degrees -> metres around an origin."""
 

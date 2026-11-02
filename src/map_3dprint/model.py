@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from manifold3d import Manifold
 from shapely import affinity
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
@@ -58,6 +58,7 @@ class Options:
     magnet_thickness: float = 2.0
     pin: bool = False
     pin_size: float = 16.0         # pin head diameter, mm
+    route_width: float = 1.6       # mm
 
     def min_base_for_mount(self) -> float:
         """Base thickness needed to fit the chosen mount cavities, mm."""
@@ -142,8 +143,8 @@ def _building_groups(buildings, opts: Options) -> dict[float, BaseGeometry]:
     return {h: _scaled_polys(polys, s) for h, polys in groups.items()}
 
 
-def pin_outline(opts: Options) -> tuple[BaseGeometry, BaseGeometry]:
-    """Map-pin silhouette with its tip at (0, 0), and the house cut-out in its head."""
+def pin_outline(opts: Options, icon: str = "house") -> tuple[BaseGeometry, BaseGeometry]:
+    """Map-pin silhouette with its tip at (0, 0), and the icon cut-out in its head."""
     r = opts.pin_size / 2
     cy = 2.3 * r
     head = Point(0, cy).buffer(r, quad_segs=32)
@@ -156,10 +157,20 @@ def pin_outline(opts: Options) -> tuple[BaseGeometry, BaseGeometry]:
                     (0, y0 + body_h + roof_h)])
     door = box(-0.13 * r, y0, 0.13 * r, y0 + 0.32 * r)
     house = unary_union([body, roof]).difference(door)
+    if icon == "dot":
+        return outline, Point(0, cy).buffer(0.45 * r, quad_segs=24)
     return outline, house
 
 
-def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
+@dataclass
+class Overlay:
+    """Extra markers, in local metres (same frame as MapFeatures)."""
+
+    pins: list[tuple[float, float]] = field(default_factory=list)  # additional stops
+    route: LineString | None = None
+
+
+def build_map(feats: MapFeatures, opts: Options, overlay: Overlay | None = None) -> dict[str, Manifold]:
     s = opts.mm_per_m
     outline = tile_outline(opts)
     margin = opts.frame_overlap if opts.frame else 0.6
@@ -175,16 +186,29 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
     parks = _scaled_polys(feats.parks, s) if opts.parks else Polygon()
     rails = _scaled_lines(feats.rails, s, opts.min_rail_width) if opts.railways else Polygon()
 
-    keep_out = Polygon()
-    if opts.pin:
-        keep_out = pin_outline(opts)[0].buffer(0.8)
+    overlay = overlay or Overlay()
+    pins = [((0.0, 0.0), "house")] if opts.pin else []
+    for x, y in overlay.pins:
+        pt = (x * s, y * s)
+        if inner.contains(Point(pt)):
+            pins.append((pt, "dot"))
+        else:
+            print(f"  warning: extra pin at {x:.0f} m, {y:.0f} m is outside the tile, skipped")
+    pin_shapes = [tuple(affinity.translate(g, *pt) for g in pin_outline(opts, icon))
+                  for pt, icon in pins]
+    keep_out = unary_union([o.buffer(0.8) for o, _ in pin_shapes]) if pin_shapes else Polygon()
+    route = Polygon()
+    if overlay.route is not None:
+        route = _scaled_lines([(overlay.route, 0)], s, opts.route_width)
 
     def finish(g):
         return _clean(g.intersection(inner).difference(keep_out))
 
-    roads, paths, water, parks, rails = map(finish, (roads, paths, water, parks, rails))
-    building_groups = {h: g for h, g in ((h, finish(g)) for h, g in building_groups.items())
-                       if not g.is_empty}
+    route = finish(route)
+    roads, paths, water, parks, rails = (finish(g).difference(route)
+                                         for g in (roads, paths, water, parks, rails))
+    building_groups = {h: g for h, g in ((h, finish(g).difference(route))
+                                         for h, g in building_groups.items()) if not g.is_empty}
     buildings = unary_union(list(building_groups.values()))
     roads = roads.difference(buildings)  # buildings win where data overlaps
     paths = paths.difference(buildings).difference(rails)
@@ -208,12 +232,12 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
         "rails": extrude(rails, z, opts.rail_height),
         "buildings": union([extrude(g, z, h) for h, g in building_groups.items()]),
     }
-    if opts.pin:
-        outline, house = pin_outline(opts)
+    parts["route"] = extrude(route, z, max(opts.road_height, opts.path_height) + 0.6)
+    if pin_shapes:
         tallest = max(building_groups, default=opts.building_height)
         top = z + max(tallest, opts.road_height) + 1.6
-        pin = extrude(outline, z, top - z) - extrude(house, top - 0.8, 2.0)
-        parts["pin"] = pin
+        parts["pin"] = union([extrude(o, z, top - z) - extrude(icon, top - 0.8, 2.0)
+                              for o, icon in pin_shapes])
     return {k: v for k, v in parts.items() if not v.is_empty()}
 
 

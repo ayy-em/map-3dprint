@@ -10,14 +10,16 @@ import unicodedata
 from pathlib import Path
 
 from .geometry import write_3mf, write_stl
-from .model import Options, build_frame, build_map, build_stand, describe_scale, merged
-from .osm import Location, OverpassError, fetch_features, geocode
+from .model import Options, Overlay, build_frame, build_map, build_stand, describe_scale, merged
+from shapely.geometry import LineString
+
+from .osm import Location, OverpassError, Projector, fetch_features, geocode, locate, route
 
 # Display colours for the 3MF parts (slicers show these; assign filaments per part).
 COLORS = {
     "base": "#2B2B2B", "roads": "#F2F2F2", "paths": "#A8A8A8", "buildings": "#E0B04A",
     "parks": "#5DA35D", "rails": "#7A5C48",
-    "pin": "#D7263D", "frame": "#2B2B2B", "text": "#F2F2F2", "stand": "#2B2B2B",
+    "pin": "#D7263D", "route": "#D7263D", "frame": "#2B2B2B", "text": "#F2F2F2", "stand": "#2B2B2B",
 }
 
 
@@ -69,6 +71,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--pin", action=argparse.BooleanOptionalAction, default=d.pin,
                    help="Add a raised map pin with a house icon at the address")
     g.add_argument("--pin-size", type=float, default=d.pin_size, help="Pin head diameter, mm")
+    g.add_argument("--add-pin", action="append", default=[], metavar="ADDRESS",
+                   help="Extra pin (address or 'lat,lon'); repeat for several. Must fall on the tile.")
+    g.add_argument("--route", choices=("none", "straight", "walk", "bike", "drive"), default="none",
+                   help="Raised route from the main address through the --add-pin stops, in order")
+    g.add_argument("--route-width", type=float, default=d.route_width, help="Route line width, mm")
 
     g.add_argument("--mount", choices=("none", "keyhole", "magnets", "stand"), default=d.mount,
                    help="Hanging/standing hardware: keyhole slots or magnet pockets in the back of the tile "
@@ -132,13 +139,26 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  {len(feats.roads)} roads, {len(feats.paths)} paths, {len(feats.buildings)} buildings, "
           f"{len(feats.water)} water areas, {len(feats.parks)} parks, {len(feats.rails)} railway lines")
 
+    overlay = Overlay()
+    stops = [locate(p) for p in a.add_pin]
+    proj = Projector(loc.lat, loc.lon)
+    overlay.pins = [proj(p.lat, p.lon) for p in stops]
+    for p in stops:
+        print(f"  pin: {p.label}")
+    if a.route != "none":
+        if not stops:
+            raise SystemExit("--route needs at least one --add-pin stop")
+        line = route([loc, *stops], a.route)
+        overlay.route = LineString([proj(lat, lon) for lat, lon in line])
+        print(f"  route ({a.route}): {overlay.route.length / 1000:.2f} km")
+
     name = a.name or slugify(a.address)
     out: Path = a.out_dir
     want_stl, want_3mf = a.format in ("both", "stl"), a.format in ("both", "3mf")
     written = []
 
     print("Building map tile ...")
-    pieces = {"map": build_map(feats, opts)}
+    pieces = {"map": build_map(feats, opts, overlay)}
     if opts.frame:
         print("Building frame ...")
         pieces["frame"] = build_frame(opts, a.label or a.address)

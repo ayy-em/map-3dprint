@@ -56,6 +56,8 @@ class MapFeatures:
     buildings: list[tuple[Polygon, float | None]] = field(default_factory=list)  # (footprint, height_m)
     water: list[Polygon] = field(default_factory=list)
     waterways: list[tuple[LineString, float]] = field(default_factory=list)
+    parks: list[Polygon] = field(default_factory=list)
+    rails: list[tuple[LineString, float]] = field(default_factory=list)
 
 
 def _cached_request(key: str, fetch) -> dict | list:
@@ -102,22 +104,28 @@ class Projector:
         return (self.lat0 - dlat, self.lon0 - dlon, self.lat0 + dlat, self.lon0 + dlon)
 
 
+class OverpassError(RuntimeError):
+    pass
+
+
 def _overpass(query: str) -> dict:
     def fetch():
-        last_err: Exception | None = None
+        errors = []
         for url in OVERPASS_URLS:
             for attempt in range(2):
                 try:
                     r = requests.post(url, data={"data": query},
-                                      headers={"User-Agent": USER_AGENT}, timeout=180)
+                                      headers={"User-Agent": USER_AGENT}, timeout=(15, 180))
                     if r.status_code in (429, 504):
+                        errors.append(f"{url}: HTTP {r.status_code}")
                         time.sleep(5 * (attempt + 1))
                         continue
                     r.raise_for_status()
                     return r.json()
                 except requests.RequestException as e:
-                    last_err = e
-        raise SystemExit(f"Overpass API request failed: {last_err}")
+                    errors.append(f"{url}: {type(e).__name__}")
+                    break  # unreachable or timed out: try the next mirror
+        raise OverpassError("all Overpass servers failed (" + "; ".join(errors) + ")")
 
     return _cached_request(f"overpass:{query}", fetch)
 
@@ -158,9 +166,11 @@ def _closed_polygon(coords) -> Polygon | None:
     return poly if not poly.is_empty and isinstance(poly, Polygon) else None
 
 
-def fetch_features(loc: Location, half_m: float) -> MapFeatures:
+def fetch_features(loc: Location, half_m: float, extras: bool = True,
+                   pad: float = 1.15) -> MapFeatures:
+    """Download map data. `extras` (parks, railways) is a separate, optional query."""
     proj = Projector(loc.lat, loc.lon)
-    s, w, n, e = proj.bbox(half_m * 1.15)
+    s, w, n, e = proj.bbox(half_m * pad)
     bbox = f"{s:.7f},{w:.7f},{n:.7f},{e:.7f}"
     query = f"""
 [out:json][timeout:120];
@@ -174,9 +184,26 @@ def fetch_features(loc: Location, half_m: float) -> MapFeatures:
 );
 out geom;
 """
-    data = _overpass(query)
+    extra_query = f"""
+[out:json][timeout:120];
+(
+  way["leisure"~"^(park|garden)$"]({bbox});
+  relation["leisure"~"^(park|garden)$"]({bbox});
+  way["landuse"~"^(grass|forest|meadow|recreation_ground|village_green|cemetery)$"]({bbox});
+  relation["landuse"~"^(grass|forest|meadow|recreation_ground|village_green|cemetery)$"]({bbox});
+  way["natural"~"^(wood|scrub)$"]({bbox});
+  way["railway"~"^(rail|light_rail|narrow_gauge)$"]({bbox});
+);
+out geom;
+"""
+    elements = _overpass(query).get("elements", [])
+    if extras:
+        try:
+            elements += _overpass(extra_query).get("elements", [])
+        except OverpassError as e:
+            print(f"  warning: skipping parks/railways, {e}")
     feats = MapFeatures()
-    for el in data.get("elements", []):
+    for el in elements:
         tags = el.get("tags", {})
         if el["type"] == "relation":
             polys = _relation_polygons(el, proj)
@@ -185,6 +212,8 @@ out geom;
                 feats.buildings += [(p, h) for p in polys]
             elif tags.get("natural") == "water":
                 feats.water += polys
+            elif _is_park(tags):
+                feats.parks += polys
             continue
 
         coords = _way_coords(el, proj)
@@ -210,12 +239,30 @@ out geom;
                 feats.roads.append((line, width))
             elif hw in PATH_WIDTHS_M:
                 feats.paths.append((line, PATH_WIDTHS_M[hw]))
+        elif tags.get("railway") in RAIL_TYPES:
+            if tags.get("tunnel") != "yes" and not tags.get("layer", "0").startswith("-"):
+                feats.rails.append((LineString(coords), 4.0))
         elif tags.get("natural") == "water" or tags.get("waterway") == "riverbank":
             if closed and (p := _closed_polygon(coords)):
                 feats.water.append(p)
         elif tags.get("waterway") in ("river", "canal"):
             feats.waterways.append((LineString(coords), _tag_width(tags) or 15.0))
+        elif _is_park(tags):
+            if closed and (p := _closed_polygon(coords)):
+                feats.parks.append(p)
     return feats
+
+
+RAIL_TYPES = ("rail", "light_rail", "narrow_gauge")
+PARK_TAGS = {
+    "leisure": ("park", "garden"),
+    "landuse": ("grass", "forest", "meadow", "recreation_ground", "village_green", "cemetery"),
+    "natural": ("wood", "scrub"),
+}
+
+
+def _is_park(tags: dict) -> bool:
+    return any(tags.get(k) in v for k, v in PARK_TAGS.items())
 
 
 def _tag_number(tags: dict, key: str) -> float | None:

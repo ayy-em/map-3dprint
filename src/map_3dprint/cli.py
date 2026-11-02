@@ -11,11 +11,12 @@ from pathlib import Path
 
 from .geometry import write_3mf, write_stl
 from .model import Options, build_frame, build_map, describe_scale, merged
-from .osm import Location, fetch_features, geocode
+from .osm import Location, OverpassError, fetch_features, geocode
 
 # Display colours for the 3MF parts (slicers show these; assign filaments per part).
 COLORS = {
     "base": "#2B2B2B", "roads": "#F2F2F2", "paths": "#A8A8A8", "buildings": "#E0B04A",
+    "parks": "#5DA35D", "rails": "#7A5C48",
     "pin": "#D7263D", "frame": "#2B2B2B", "text": "#F2F2F2",
 }
 
@@ -55,6 +56,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Cap for real building heights, mm")
     g.add_argument("--water-depth", type=float, default=d.water_depth,
                    help="Depth water is recessed into the base, mm (0 = off)")
+    g.add_argument("--parks", action=argparse.BooleanOptionalAction, default=d.parks,
+                   help="Raise parks, gardens, woods and grass as a thin layer")
+    g.add_argument("--park-height", type=float, default=d.park_height, help="Park relief above base, mm")
+    g.add_argument("--railways", action=argparse.BooleanOptionalAction, default=d.railways,
+                   help="Include above-ground railway lines")
+    g.add_argument("--rail-height", type=float, default=d.rail_height, help="Railway relief above base, mm")
     g.add_argument("--min-road-width", type=float, default=d.min_road_width, help="Minimum road width, mm")
     g.add_argument("--min-path-width", type=float, default=d.min_path_width, help="Minimum path width, mm")
     g.add_argument("--pin", action=argparse.BooleanOptionalAction, default=d.pin,
@@ -94,7 +101,7 @@ def main(argv: list[str] | None = None) -> None:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     a = parse_args(argv)
-    opts = Options(**{k: getattr(a, k) for k in Options.__dataclass_fields__})
+    opts = Options(**{k: getattr(a, k) for k in Options.__dataclass_fields__ if hasattr(a, k)})
     if not opts.frame:
         opts.frame_overlap = 0.0
 
@@ -107,9 +114,12 @@ def main(argv: list[str] | None = None) -> None:
         loc = geocode(a.address)
     print(f"  -> {loc.label}  ({loc.lat:.6f}, {loc.lon:.6f})")
     print(f"Downloading OpenStreetMap data, {describe_scale(opts)} ...")
-    feats = fetch_features(loc, opts.radius)
+    try:
+        feats = fetch_features(loc, opts.radius, extras=opts.parks or opts.railways)
+    except OverpassError as e:
+        raise SystemExit(f"Could not download map data: {e}. Try again in a few minutes.")
     print(f"  {len(feats.roads)} roads, {len(feats.paths)} paths, {len(feats.buildings)} buildings, "
-          f"{len(feats.water)} water areas")
+          f"{len(feats.water)} water areas, {len(feats.parks)} parks, {len(feats.rails)} railway lines")
 
     name = a.name or slugify(a.address)
     out: Path = a.out_dir

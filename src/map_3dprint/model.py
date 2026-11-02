@@ -28,6 +28,11 @@ class Options:
     water_depth: float = 0.6
     min_road_width: float = 1.0
     min_path_width: float = 0.6
+    parks: bool = True
+    park_height: float = 0.4
+    railways: bool = True
+    rail_height: float = 0.8
+    min_rail_width: float = 0.8
     frame: bool = True
     border_radius: float = 6.0
     frame_width: float = 8.0
@@ -112,6 +117,9 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
     water = unary_union([_scaled_polys(feats.water, s),
                          _scaled_lines(feats.waterways, s, opts.min_road_width)])
 
+    parks = _scaled_polys(feats.parks, s) if opts.parks else Polygon()
+    rails = _scaled_lines(feats.rails, s, opts.min_rail_width) if opts.railways else Polygon()
+
     keep_out = Polygon()
     if opts.pin:
         keep_out = pin_outline(opts)[0].buffer(0.8)
@@ -119,12 +127,14 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
     def finish(g):
         return _clean(g.intersection(inner).difference(keep_out))
 
-    roads, paths, water = map(finish, (roads, paths, water))
+    roads, paths, water, parks, rails = map(finish, (roads, paths, water, parks, rails))
     building_groups = {h: g for h, g in ((h, finish(g)) for h, g in building_groups.items())
                        if not g.is_empty}
     buildings = unary_union(list(building_groups.values()))
     roads = roads.difference(buildings)  # buildings win where data overlaps
-    paths = paths.difference(buildings)
+    paths = paths.difference(buildings).difference(rails)
+    rails = rails.difference(buildings)
+    parks = _clean(parks.difference(unary_union([roads, paths, buildings, water, rails])))
 
     plate = rounded_rect(-half, -half, half, half, 0 if opts.frame else opts.border_radius)
     base = extrude(plate, 0, opts.base_height)
@@ -137,6 +147,8 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
         "base": base,
         "roads": extrude(roads, z, opts.road_height),
         "paths": extrude(paths, z, opts.path_height),
+        "parks": extrude(parks, z, opts.park_height),
+        "rails": extrude(rails, z, opts.rail_height),
         "buildings": union([extrude(g, z, h) for h, g in building_groups.items()]),
     }
     if opts.pin:

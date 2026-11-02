@@ -46,6 +46,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     g = p.add_argument_group("map")
     g.add_argument("--size", type=float, default=d.size, help="Map tile side length, mm")
+    g.add_argument("--rotate", type=float, default=d.rotate,
+                   help="Rotate the map counter-clockwise by this many degrees (the compass follows)")
     g.add_argument("--shape", choices=("square", "circle", "hexagon", "heart"), default=d.shape,
                    help="Outline of the map tile (the frame follows it)")
     g.add_argument("--radius", type=float, default=d.radius,
@@ -143,7 +145,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  -> {loc.label}  ({loc.lat:.6f}, {loc.lon:.6f})")
     print(f"Downloading OpenStreetMap data, {describe_scale(opts)} ...")
     try:
-        feats = fetch_features(loc, opts.radius, extras=opts.parks or opts.railways)
+        feats = fetch_features(loc, opts.radius, extras=opts.parks or opts.railways,
+                               pad=1.15 if opts.rotate % 90 == 0 else 1.45)
     except OverpassError as e:
         raise SystemExit(f"Could not download map data: {e}. Try again in a few minutes.")
     print(f"  {len(feats.roads)} roads, {len(feats.paths)} paths, {len(feats.buildings)} buildings, "

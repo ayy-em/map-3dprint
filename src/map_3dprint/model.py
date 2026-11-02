@@ -193,7 +193,8 @@ def build_map(feats: MapFeatures, opts: Options, overlay: Overlay | None = None)
     overlay = overlay or Overlay()
     pins = [((0.0, 0.0), "house")] if opts.pin else []
     for x, y in overlay.pins:
-        pt = (x * s, y * s)
+        a = math.radians(opts.rotate)
+        pt = ((x * math.cos(a) - y * math.sin(a)) * s, (x * math.sin(a) + y * math.cos(a)) * s)
         if inner.contains(Point(pt)):
             pins.append((pt, "dot"))
         else:
@@ -206,6 +207,8 @@ def build_map(feats: MapFeatures, opts: Options, overlay: Overlay | None = None)
         route = _scaled_lines([(overlay.route, 0)], s, opts.route_width)
 
     def finish(g):
+        if opts.rotate:
+            g = affinity.rotate(g, opts.rotate, origin=(0, 0))
         return _clean(g.intersection(inner).difference(keep_out))
 
     route = finish(route)

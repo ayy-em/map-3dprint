@@ -21,7 +21,10 @@ class Options:
     base_height: float = 1.2
     road_height: float = 1.0
     path_height: float = 0.6
-    building_height: float = 2.4
+    building_height: float = 2.4   # flat mode height; fallback scale in real mode
+    building_heights: str = "flat"  # flat | real
+    height_scale: float = 1.0      # vertical exaggeration for real heights
+    max_building_height: float = 8.0
     water_depth: float = 0.6
     min_road_width: float = 1.0
     min_path_width: float = 0.6
@@ -63,6 +66,22 @@ def _clean(geom: BaseGeometry, min_area: float = 0.2, simplify: float = 0.05) ->
     return unary_union([p for p in polygons_of(geom) if p.area >= min_area])
 
 
+def _building_groups(buildings, opts: Options) -> dict[float, BaseGeometry]:
+    """Group building footprints (scaled to mm) by printed height, quantised to 0.2 mm."""
+    s = opts.mm_per_m
+    if opts.building_heights == "flat":
+        return {opts.building_height: _scaled_polys([p for p, _ in buildings], s)}
+    known = sorted(h for _, h in buildings if h)
+    fallback = known[len(known) // 2] if known else 3 * 3.2  # median, else 3 storeys
+    lo = max(opts.path_height, opts.road_height) + 0.4
+    groups: dict[float, list] = {}
+    for poly, h in buildings:
+        mm = (h or fallback) * s * opts.height_scale
+        mm = round(min(max(mm, lo), opts.max_building_height) / 0.2) * 0.2
+        groups.setdefault(round(mm, 1), []).append(poly)
+    return {h: _scaled_polys(polys, s) for h, polys in groups.items()}
+
+
 def pin_outline(opts: Options) -> tuple[BaseGeometry, BaseGeometry]:
     """Map-pin silhouette with its tip at (0, 0), and the house cut-out in its head."""
     r = opts.pin_size / 2
@@ -89,7 +108,7 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
     roads = _scaled_lines(feats.roads, s, opts.min_road_width)
     paths = unary_union([_scaled_lines(feats.paths, s, opts.min_path_width),
                          _scaled_polys(feats.areas, s)]).difference(roads)
-    buildings = _scaled_polys(feats.buildings, s)
+    building_groups = _building_groups(feats.buildings, opts)
     water = unary_union([_scaled_polys(feats.water, s),
                          _scaled_lines(feats.waterways, s, opts.min_road_width)])
 
@@ -100,7 +119,10 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
     def finish(g):
         return _clean(g.intersection(inner).difference(keep_out))
 
-    roads, paths, buildings, water = map(finish, (roads, paths, buildings, water))
+    roads, paths, water = map(finish, (roads, paths, water))
+    building_groups = {h: g for h, g in ((h, finish(g)) for h, g in building_groups.items())
+                       if not g.is_empty}
+    buildings = unary_union(list(building_groups.values()))
     roads = roads.difference(buildings)  # buildings win where data overlaps
     paths = paths.difference(buildings)
 
@@ -115,11 +137,12 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
         "base": base,
         "roads": extrude(roads, z, opts.road_height),
         "paths": extrude(paths, z, opts.path_height),
-        "buildings": extrude(buildings, z, opts.building_height),
+        "buildings": union([extrude(g, z, h) for h, g in building_groups.items()]),
     }
     if opts.pin:
         outline, house = pin_outline(opts)
-        top = z + max(opts.building_height, opts.road_height) + 1.6
+        tallest = max(building_groups, default=opts.building_height)
+        top = z + max(tallest, opts.road_height) + 1.6
         pin = extrude(outline, z, top - z) - extrude(house, top - 0.8, 2.0)
         parts["pin"] = pin
     return {k: v for k, v in parts.items() if not v.is_empty()}

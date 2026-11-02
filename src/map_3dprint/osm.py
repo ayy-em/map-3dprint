@@ -53,7 +53,7 @@ class MapFeatures:
     roads: list[tuple[LineString, float]] = field(default_factory=list)  # (line, width_m)
     paths: list[tuple[LineString, float]] = field(default_factory=list)
     areas: list[Polygon] = field(default_factory=list)  # pedestrian plazas etc.
-    buildings: list[Polygon] = field(default_factory=list)
+    buildings: list[tuple[Polygon, float | None]] = field(default_factory=list)  # (footprint, height_m)
     water: list[Polygon] = field(default_factory=list)
     waterways: list[tuple[LineString, float]] = field(default_factory=list)
 
@@ -181,7 +181,8 @@ out geom;
         if el["type"] == "relation":
             polys = _relation_polygons(el, proj)
             if "building" in tags:
-                feats.buildings += polys
+                h = building_height_m(tags)
+                feats.buildings += [(p, h) for p in polys]
             elif tags.get("natural") == "water":
                 feats.water += polys
             continue
@@ -194,7 +195,7 @@ out geom;
 
         if "building" in tags and tags.get("building") != "no":
             if closed and (p := _closed_polygon(coords)):
-                feats.buildings.append(p)
+                feats.buildings.append((p, building_height_m(tags)))
         elif hw:
             if tags.get("tunnel") in ("yes", "building_passage") or tags.get("layer", "0").startswith("-"):
                 continue
@@ -217,8 +218,25 @@ out geom;
     return feats
 
 
-def _tag_width(tags: dict) -> float | None:
+def _tag_number(tags: dict, key: str) -> float | None:
     try:
-        return float(tags.get("width", "").split()[0].replace(",", "."))
+        return float(tags.get(key, "").split()[0].replace(",", ".").rstrip("m"))
     except (ValueError, IndexError):
         return None
+
+
+def _tag_width(tags: dict) -> float | None:
+    return _tag_number(tags, "width")
+
+
+METRES_PER_LEVEL = 3.2
+
+
+def building_height_m(tags: dict) -> float | None:
+    """Real-world building height from OSM tags, or None when unknown."""
+    if (h := _tag_number(tags, "height")) and h > 0:
+        return h
+    if (levels := _tag_number(tags, "building:levels")) and levels > 0:
+        roof = _tag_number(tags, "roof:levels") or 0
+        return (levels + roof) * METRES_PER_LEVEL
+    return None

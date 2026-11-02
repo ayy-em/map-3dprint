@@ -45,7 +45,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--road-height", type=float, default=d.road_height, help="Road relief above base, mm")
     g.add_argument("--path-height", type=float, default=d.path_height, help="Footpath relief above base, mm")
     g.add_argument("--building-height", type=float, default=d.building_height,
-                   help="Building relief above base, mm")
+                   help="Building relief above base, mm (flat mode)")
+    g.add_argument("--building-heights", choices=("flat", "real"), default=d.building_heights,
+                   help="flat = all buildings the same height; real = from OSM height/levels tags "
+                        "(at map scale, untagged buildings use the local median)")
+    g.add_argument("--height-scale", type=float, default=d.height_scale,
+                   help="Vertical exaggeration for --building-heights real")
+    g.add_argument("--max-building-height", type=float, default=d.max_building_height,
+                   help="Cap for real building heights, mm")
     g.add_argument("--water-depth", type=float, default=d.water_depth,
                    help="Depth water is recessed into the base, mm (0 = off)")
     g.add_argument("--min-road-width", type=float, default=d.min_road_width, help="Minimum road width, mm")

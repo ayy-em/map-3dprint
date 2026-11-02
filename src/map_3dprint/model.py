@@ -17,6 +17,13 @@ from .geometry import extrude, fit_text, polygons_of, union
 from .osm import MapFeatures
 
 
+KEYHOLE_HEAD_D = 9.0     # screw-head entry hole
+KEYHOLE_SHANK_W = 4.5    # slot for the screw shank
+KEYHOLE_SLOT_L = 10.0    # how far the piece slides down onto the screw
+KEYHOLE_LIP = 1.6        # material in front of the screw head
+KEYHOLE_DEPTH = 3.4      # total cavity depth from the back face
+
+
 @dataclass
 class Options:
     size: float = 200.0            # map tile side, mm
@@ -46,8 +53,16 @@ class Options:
     text_strip: float = 24.0
     text_height: float = 0.8       # relief height (emboss) or depth (deboss/flush)
     text_style: str = "emboss"     # emboss | deboss | flush
+    mount: str = "none"            # none | keyhole | magnets | stand
+    magnet_diameter: float = 10.0
+    magnet_thickness: float = 2.0
     pin: bool = False
     pin_size: float = 16.0         # pin head diameter, mm
+
+    def min_base_for_mount(self) -> float:
+        """Base thickness needed to fit the chosen mount cavities, mm."""
+        return {"keyhole": KEYHOLE_DEPTH + 0.6,
+                "magnets": self.magnet_thickness + 0.2 + 0.6}.get(self.mount, 0.0)
 
     @property
     def mm_per_m(self) -> float:
@@ -182,6 +197,8 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
         depth = min(opts.water_depth, opts.base_height - 0.4)
         base = base - extrude(water, opts.base_height - depth, depth + 1)
 
+    base = base - mount_cavities(inner, opts)
+
     z = opts.base_height
     parts = {
         "base": base,
@@ -198,6 +215,63 @@ def build_map(feats: MapFeatures, opts: Options) -> dict[str, Manifold]:
         pin = extrude(outline, z, top - z) - extrude(house, top - 0.8, 2.0)
         parts["pin"] = pin
     return {k: v for k, v in parts.items() if not v.is_empty()}
+
+
+# ------------------------------------------------------------------------ mounts
+
+def _symmetric_spots(area: BaseGeometry, candidates, clearance: float, want: int):
+    """Pick mirrored (x, y) pairs from `candidates` whose clearance circle fits inside `area`."""
+    spots = []
+    for x, y in candidates:
+        pair = [(x, y), (-x, y)]
+        if all(area.contains(Point(p).buffer(clearance)) for p in pair):
+            spots += pair
+        if len(spots) >= want:
+            break
+    return spots[:want]
+
+
+def mount_cavities(area: BaseGeometry, opts: Options) -> Manifold:
+    """Cavities cut into the back (z = 0) face of the tile for hanging hardware."""
+    S = opts.size
+    if opts.mount == "magnets":
+        r = opts.magnet_diameter / 2 + 0.1
+        cands = [(0.35 * S, 0.35 * S), (0.35 * S, -0.35 * S), (0.25 * S, 0.3 * S),
+                 (0.2 * S, -0.15 * S), (0.15 * S, -0.3 * S), (0.15 * S, 0.0)]
+        spots = _symmetric_spots(area, cands, r + 3, 4)
+        return union([extrude(Point(p).buffer(r, quad_segs=32), -1, opts.magnet_thickness + 0.2 + 1)
+                      for p in spots])
+    if opts.mount == "keyhole":
+        cands = [(0.25 * S, 0.3 * S), (0.2 * S, 0.2 * S), (0.15 * S, 0.1 * S)]
+        cuts = []
+        for x, y in _symmetric_spots(area, cands, KEYHOLE_HEAD_D + KEYHOLE_SLOT_L, 2):
+            head = Point(x, y).buffer(KEYHOLE_HEAD_D / 2, quad_segs=24)
+            shank = box(x - KEYHOLE_SHANK_W / 2, y, x + KEYHOLE_SHANK_W / 2, y + KEYHOLE_SLOT_L)
+            under = box(x - KEYHOLE_HEAD_D / 2, y, x + KEYHOLE_HEAD_D / 2, y + KEYHOLE_SLOT_L)
+            shank = shank.union(Point(x, y + KEYHOLE_SLOT_L).buffer(KEYHOLE_SHANK_W / 2))
+            under = under.union(Point(x, y + KEYHOLE_SLOT_L).buffer(KEYHOLE_HEAD_D / 2))
+            cuts += [extrude(head.union(shank), -1, KEYHOLE_LIP + 1),           # open at the back
+                     extrude(head.union(under), KEYHOLE_LIP - 0.01, KEYHOLE_DEPTH - KEYHOLE_LIP)]
+        return union(cuts)
+    return Manifold()
+
+
+def build_stand(opts: Options) -> Manifold:
+    """Desk stand: a bar with a slot, leaning 15 degrees back, that holds the bottom edge."""
+    held = opts.frame_thickness if opts.frame else opts.base_height
+    slot_w, slot_d, lean = held + 0.4, 9.0, math.radians(15)
+    depth, height = 44.0, 18.0
+    length = min(0.6 * opts.size, 140.0)
+    profile = Polygon([(0, 0), (depth, 0), (depth, 9), (depth - 12, height),
+                       (12, height), (0, 7)])
+    cx, floor = depth / 2, height - slot_d
+    slot = box(-slot_w / 2, 0, slot_w / 2, 40)  # rotated about its bottom centre
+    slot = affinity.rotate(slot, -math.degrees(lean), origin=(0, 0))
+    slot = affinity.translate(slot, cx, floor)
+    m = extrude(profile.difference(slot), 0, length)
+    # profile was drawn in XY and extruded along Z; lay it down so the profile stands upright
+    m = m.transform(np.array([[0, 0, 1, -length / 2], [1, 0, 0, -cx], [0, 1, 0, 0]], dtype=float))
+    return m
 
 
 # ------------------------------------------------------------------------- frame

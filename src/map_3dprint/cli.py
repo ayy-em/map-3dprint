@@ -10,14 +10,14 @@ import unicodedata
 from pathlib import Path
 
 from .geometry import write_3mf, write_stl
-from .model import Options, build_frame, build_map, describe_scale, merged
+from .model import Options, build_frame, build_map, build_stand, describe_scale, merged
 from .osm import Location, OverpassError, fetch_features, geocode
 
 # Display colours for the 3MF parts (slicers show these; assign filaments per part).
 COLORS = {
     "base": "#2B2B2B", "roads": "#F2F2F2", "paths": "#A8A8A8", "buildings": "#E0B04A",
     "parks": "#5DA35D", "rails": "#7A5C48",
-    "pin": "#D7263D", "frame": "#2B2B2B", "text": "#F2F2F2",
+    "pin": "#D7263D", "frame": "#2B2B2B", "text": "#F2F2F2", "stand": "#2B2B2B",
 }
 
 
@@ -70,6 +70,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Add a raised map pin with a house icon at the address")
     g.add_argument("--pin-size", type=float, default=d.pin_size, help="Pin head diameter, mm")
 
+    g.add_argument("--mount", choices=("none", "keyhole", "magnets", "stand"), default=d.mount,
+                   help="Hanging/standing hardware: keyhole slots or magnet pockets in the back of the tile "
+                        "(the base is thickened to fit), or a separate desk stand piece")
+    g.add_argument("--magnet-diameter", type=float, default=d.magnet_diameter, help="Magnet diameter, mm")
+    g.add_argument("--magnet-thickness", type=float, default=d.magnet_thickness, help="Magnet thickness, mm")
+
     g = p.add_argument_group("frame")
     g.add_argument("--frame", action=argparse.BooleanOptionalAction, default=d.frame,
                    help="Generate the frame/bezel STL")
@@ -106,6 +112,9 @@ def main(argv: list[str] | None = None) -> None:
     opts = Options(**{k: getattr(a, k) for k in Options.__dataclass_fields__ if hasattr(a, k)})
     if not opts.frame:
         opts.frame_overlap = 0.0
+    if opts.base_height < opts.min_base_for_mount():
+        opts.base_height = round(opts.min_base_for_mount(), 2)
+        print(f"Note: base thickened to {opts.base_height} mm to fit the {opts.mount} mount")
 
     t0 = time.perf_counter()
     if a.coords:
@@ -133,6 +142,8 @@ def main(argv: list[str] | None = None) -> None:
     if opts.frame:
         print("Building frame ...")
         pieces["frame"] = build_frame(opts, a.label or a.address)
+    if opts.mount == "stand":
+        pieces["stand"] = {"stand": build_stand(opts)}
 
     if want_stl:
         for piece, parts in pieces.items():
@@ -145,7 +156,8 @@ def main(argv: list[str] | None = None) -> None:
         coloured = {piece: {k: (m, COLORS.get(k, "#808080")) for k, m in parts.items()}
                     for piece, parts in pieces.items()}
         # Place the frame next to the tile so both fit on the plate preview without overlapping.
-        offsets = {"frame": (opts.size + 2 * opts.frame_width + 10, 0.0)}
+        offsets = {"frame": (opts.size + 2 * opts.frame_width + 10, 0.0),
+                   "stand": (0.0, -opts.size / 2 - opts.text_strip - 40)}
         path = out / f"{name}.3mf"
         written.append((path, write_3mf(coloured, path, offsets)))
 

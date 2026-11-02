@@ -23,6 +23,10 @@ COLORS = {
 }
 
 
+def format_coords(lat: float, lon: float) -> str:
+    return f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}, {abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
+
+
 def slugify(text: str) -> str:
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")[:60] or "map"
@@ -100,6 +104,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--text-style", choices=("emboss", "deboss", "flush"), default=d.text_style,
                    help="emboss = raised letters, deboss = carved in, flush = separate inlay part level "
                         "with the surface (for a second colour; use 3MF or --split)")
+    g.add_argument("--coordinates", action=argparse.BooleanOptionalAction, default=d.coordinates,
+                   help="Add a second text line with the latitude/longitude")
+    g.add_argument("--compass", action=argparse.BooleanOptionalAction, default=d.compass,
+                   help="Compass rose on the left of the text strip")
+    g.add_argument("--scale-bar", action=argparse.BooleanOptionalAction, default=d.scale_bar,
+                   help="Scale bar on the right of the text strip")
     g.add_argument("--text-height", type=float, default=d.text_height,
                    help="Text relief height (emboss) or depth (deboss/flush), mm")
 
@@ -161,7 +171,7 @@ def main(argv: list[str] | None = None) -> None:
     pieces = {"map": build_map(feats, opts, overlay)}
     if opts.frame:
         print("Building frame ...")
-        pieces["frame"] = build_frame(opts, a.label or a.address)
+        pieces["frame"] = build_frame(opts, a.label or a.address, format_coords(loc.lat, loc.lon))
     if opts.mount == "stand":
         pieces["stand"] = {"stand": build_stand(opts)}
 

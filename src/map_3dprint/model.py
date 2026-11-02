@@ -13,7 +13,7 @@ from shapely.geometry import LineString, Point, Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from .geometry import extrude, fit_text, polygons_of, union
+from .geometry import extrude, fit_text, polygons_of, text_outline, union
 from .osm import MapFeatures
 
 
@@ -53,6 +53,10 @@ class Options:
     text_strip: float = 24.0
     text_height: float = 0.8       # relief height (emboss) or depth (deboss/flush)
     text_style: str = "emboss"     # emboss | deboss | flush
+    coordinates: bool = False      # second text line with lat/lon
+    compass: bool = False
+    scale_bar: bool = False
+    rotate: float = 0.0            # map rotation, degrees counter-clockwise
     mount: str = "none"            # none | keyhole | magnets | stand
     magnet_diameter: float = 10.0
     magnet_thickness: float = 2.0
@@ -300,12 +304,55 @@ def build_stand(opts: Options) -> Manifold:
 
 # ------------------------------------------------------------------------- frame
 
-def build_frame(opts: Options, label: str | None) -> dict[str, Manifold]:
+def compass_rose(d: float, angle: float = 0.0) -> BaseGeometry:
+    """8-point compass star with an 'N', fitting a d x d box centred on the origin."""
+    r_long, r_short, r_mid = 0.34 * d, 0.13 * d, 0.2 * d
+    pts = []
+    for i in range(16):  # alternate long/short points with narrow waists between them
+        a = math.radians(90 - i * 22.5)
+        r = (r_long if i % 4 == 0 else r_mid) if i % 2 == 0 else 0.06 * d
+        pts.append((r * math.cos(a), r * math.sin(a)))
+    star = Polygon(pts).union(Point(0, 0).buffer(r_short * 0.45)).difference(Point(0, 0).buffer(r_short * 0.2))
+    star = affinity.translate(star, 0, -0.1 * d)
+    n = text_outline("N")
+    nx0, ny0, nx1, ny1 = n.bounds
+    k = 0.2 * d / (ny1 - ny0)
+    n = affinity.translate(affinity.scale(n, k, k, origin=(0, 0)), -(nx0 + nx1) / 2 * k,
+                           0.5 * d - ny1 * k)
+    # keep the N above the north tip when rotated
+    tip = affinity.rotate(Point(0, -0.1 * d + r_long), angle, origin=(0, -0.1 * d))
+    n = affinity.translate(n, tip.x, tip.y - (-0.1 * d + r_long))
+    return unary_union([affinity.rotate(star, angle, origin=(0, -0.1 * d)), n])
+
+
+def scale_bar(max_w: float, h: float, mm_per_m: float) -> BaseGeometry:
+    """A scale bar with a distance label, at most max_w wide and h tall, centred on the origin."""
+    nice = [10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000]
+    fitting = [d for d in nice if d * mm_per_m <= max_w * 0.9]
+    dist = fitting[-1] if fitting else nice[0]
+    w = dist * mm_per_m
+    thick, tick = max(0.12 * h, 1.0), 0.3 * h
+    y = 0.05 * h
+    bar = unary_union([
+        box(-w / 2, y, w / 2, y + thick),
+        box(-w / 2, y, -w / 2 + thick, y + tick), box(w / 2 - thick, y, w / 2, y + tick),
+        box(-thick / 2, y, thick / 2, y + tick * 0.6),
+    ])
+    label = f"{dist // 1000} km" if dist >= 1000 and dist % 1000 == 0 else f"{dist} m"
+    txt = fit_text(label, w, 0.38 * h)
+    _, ty0, _, ty1 = txt.bounds
+    txt = affinity.translate(txt, 0, y - 0.12 * h - ty1)
+    return unary_union([bar, txt])
+
+
+def build_frame(opts: Options, label: str | None, coords: str | None = None) -> dict[str, Manifold]:
     """A bezel that lies on top of the map tile, covering `frame_overlap` mm of its edge."""
     fw = opts.frame_width
     opening = inset(tile_outline(opts), opts.frame_overlap, _join(opts))
     minx, miny, maxx, _ = opening.bounds
-    has_text = opts.text and bool(label)
+    label = label if opts.text else None
+    coords = coords if opts.coordinates else None
+    has_text = bool(label or coords or opts.compass or opts.scale_bar)
     outer = opening.buffer(fw, join_style=_join(opts))
     if not has_text:
         text_box = None
@@ -324,7 +371,21 @@ def build_frame(opts: Options, label: str | None) -> dict[str, Manifold]:
         return {"frame": body}
 
     max_w, max_h, cy = text_box
-    txt = affinity.translate(fit_text(label, max_w, max_h), 0, cy)
+    deco = []
+    side = 0.0
+    if opts.compass or opts.scale_bar:
+        side = min(max_h * 2.2, max_w * 0.22)
+        if opts.compass:
+            deco.append(affinity.translate(compass_rose(max_h * 1.45, opts.rotate), -max_w / 2 + side / 2, cy))
+        if opts.scale_bar:
+            deco.append(affinity.translate(scale_bar(side, max_h, opts.mm_per_m), max_w / 2 - side / 2, cy))
+    text_w = max_w - 2 * (side + 3) if side else max_w
+    if label and coords:
+        deco += [affinity.translate(fit_text(label, text_w, max_h * 0.62), 0, cy + max_h * 0.2),
+                 affinity.translate(fit_text(coords, text_w, max_h * 0.3), 0, cy - max_h * 0.36)]
+    elif label or coords:
+        deco.append(affinity.translate(fit_text(label or coords, text_w, max_h), 0, cy))
+    txt = unary_union(deco)
     depth = min(opts.text_height, t - 0.6)  # keep >= 0.6 mm of floor under a recess
     match opts.text_style:
         case "emboss":  # raised letters on top of the frame

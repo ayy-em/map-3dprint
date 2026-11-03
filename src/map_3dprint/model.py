@@ -28,30 +28,30 @@ KEYHOLE_DEPTH = 3.4      # total cavity depth from the back face
 class Options:
     size: float = 200.0            # map tile side, mm
     radius: float = 600.0          # real-world half side covered, metres
-    base_height: float = 1.2
-    road_height: float = 1.0
-    path_height: float = 0.6
-    building_height: float = 2.4   # flat mode height; fallback scale in real mode
+    base_height: float = 2.4
+    road_height: float = 1.2
+    path_height: float = 0.8
+    building_height: float = 3.6   # flat mode height; fallback scale in real mode
     building_heights: str = "flat"  # flat | real
     height_scale: float = 1.0      # vertical exaggeration for real heights
-    max_building_height: float = 8.0
-    water_depth: float = 0.6
+    max_building_height: float = 12.0
+    water_depth: float = 0.8
     min_road_width: float = 1.0
     min_path_width: float = 0.6
     parks: bool = True
-    park_height: float = 0.4
+    park_height: float = 0.6
     railways: bool = True
-    rail_height: float = 0.8
+    rail_height: float = 1.0
     min_rail_width: float = 0.8
     shape: str = "square"          # square | circle | hexagon | heart
     frame: bool = True
     border_radius: float = 6.0
     frame_width: float = 8.0
-    frame_overlap: float = 3.0
-    frame_thickness: float = 2.0
+    seat_width: float = 1.2        # width of the 45-degree bevel the tile rests on in the frame, mm
+    fit_clearance: float = 0.2     # gap between tile edge and frame opening, per side, mm
     text: bool = True
     text_strip: float = 24.0
-    text_height: float = 0.8       # relief height (emboss) or depth (deboss/flush)
+    text_height: float = 1.0       # relief height (emboss) or depth (deboss/flush)
     text_style: str = "emboss"     # emboss | deboss | flush
     coordinates: bool = False      # second text line with lat/lon
     compass: bool = False
@@ -61,13 +61,25 @@ class Options:
     magnet_diameter: float = 10.0
     magnet_thickness: float = 2.0
     pin: bool = False
-    pin_size: float = 16.0         # pin head diameter, mm
+    pin_size: float = 9.0          # pin head diameter, mm
+    pin_height: float = 4.5        # pin height above the base, mm
     route_width: float = 1.6       # mm
 
     def min_base_for_mount(self) -> float:
         """Base thickness needed to fit the chosen mount cavities, mm."""
         return {"keyhole": KEYHOLE_DEPTH + 0.6,
                 "magnets": self.magnet_thickness + 0.2 + 0.6}.get(self.mount, 0.0)
+
+    @property
+    def frame_thickness(self) -> float:
+        """Front and back of the frame are flush with the tile's base plate."""
+        return self.base_height
+
+    @property
+    def seat(self) -> float:
+        """Bevel width actually used: leave material under water recesses at the tile edge."""
+        floor = self.base_height - (self.water_depth if self.water_depth > 0 else 0) - 0.4
+        return max(0.0, min(self.seat_width, floor, self.base_height - 0.4))
 
     @property
     def mm_per_m(self) -> float:
@@ -124,11 +136,25 @@ def _join(opts: Options) -> str:
 
 
 def inset(poly: BaseGeometry, d: float, join: str = "mitre") -> BaseGeometry:
-    return poly.buffer(-d, join_style=join) if d else poly
+    return poly.buffer(-d, join_style=join) if abs(d) > 1e-9 else poly
 
 
 def round_corners(poly: BaseGeometry, r: float) -> BaseGeometry:
     return poly.buffer(-r, join_style="mitre").buffer(r, quad_segs=16) if r > 0 else poly
+
+
+def seated_solid(poly: BaseGeometry, height: float, seat: float, grow: float = 0.0,
+                 join: str = "mitre", step: float = 0.1) -> Manifold:
+    """`poly` extruded from z = 0 to `height`, its bottom edge bevelled inward at 45 degrees
+    over `seat` mm, as a stack of `step`-tall slabs. `grow` offsets every slab outward."""
+    poly = poly.buffer(grow, join_style=join) if grow else poly
+    n = int(round(seat / step))
+    if n == 0:
+        return extrude(poly, 0, height)
+    slabs = [extrude(inset(poly, seat - (i + 1) * step, join), i * step, step + 0.001)
+             for i in range(n)]
+    slabs.append(extrude(poly, n * step, height - n * step))
+    return union(slabs)
 
 
 def _building_groups(buildings, opts: Options) -> dict[float, BaseGeometry]:
@@ -177,8 +203,7 @@ class Overlay:
 def build_map(feats: MapFeatures, opts: Options, overlay: Overlay | None = None) -> dict[str, Manifold]:
     s = opts.mm_per_m
     outline = tile_outline(opts)
-    margin = opts.frame_overlap if opts.frame else 0.6
-    inner = inset(outline, margin, _join(opts))
+    inner = inset(outline, 0.6, _join(opts))
 
     roads = _scaled_lines(feats.roads, s, opts.min_road_width)
     paths = unary_union([_scaled_lines(feats.paths, s, opts.min_path_width),
@@ -223,12 +248,16 @@ def build_map(feats: MapFeatures, opts: Options, overlay: Overlay | None = None)
     parks = _clean(parks.difference(unary_union([roads, paths, buildings, water, rails])))
 
     plate = outline if opts.frame else round_corners(outline, opts.border_radius)
-    base = extrude(plate, 0, opts.base_height)
+    if opts.frame:  # bevelled underside edge: drops into the frame's matching seat
+        base = seated_solid(plate, opts.base_height, opts.seat, join=_join(opts))
+    else:
+        base = extrude(plate, 0, opts.base_height)
     if not water.is_empty and opts.water_depth > 0:
         depth = min(opts.water_depth, opts.base_height - 0.4)
         base = base - extrude(water, opts.base_height - depth, depth + 1)
 
-    base = base - mount_cavities(inner, opts)
+    clear = opts.seat + 1 if opts.frame else 0.6  # keep hardware clear of the bevel
+    base = base - mount_cavities(inset(outline, clear, _join(opts)), opts)
 
     z = opts.base_height
     parts = {
@@ -241,9 +270,9 @@ def build_map(feats: MapFeatures, opts: Options, overlay: Overlay | None = None)
     }
     parts["route"] = extrude(route, z, max(opts.road_height, opts.path_height) + 0.6)
     if pin_shapes:
-        tallest = max(building_groups, default=opts.building_height)
-        top = z + max(tallest, opts.road_height) + 1.6
-        parts["pin"] = union([extrude(o, z, top - z) - extrude(icon, top - 0.8, 2.0)
+        h = opts.pin_height
+        cut = min(0.6, h - 0.6)
+        parts["pin"] = union([extrude(o, z, h) - extrude(icon, z + h - cut, 2.0)
                               for o, icon in pin_shapes])
     return {k: v for k, v in parts.items() if not v.is_empty()}
 
@@ -289,7 +318,7 @@ def mount_cavities(area: BaseGeometry, opts: Options) -> Manifold:
 
 def build_stand(opts: Options) -> Manifold:
     """Desk stand: a bar with a slot, leaning 15 degrees back, that holds the bottom edge."""
-    held = opts.frame_thickness if opts.frame else opts.base_height
+    held = opts.frame_thickness if opts.frame else opts.base_height  # tile sits inside the frame
     slot_w, slot_d, lean = held + 0.4, 9.0, math.radians(15)
     depth, height = 44.0, 18.0
     length = min(0.6 * opts.size, 140.0)
@@ -349,9 +378,15 @@ def scale_bar(max_w: float, h: float, mm_per_m: float) -> BaseGeometry:
 
 
 def build_frame(opts: Options, label: str | None, coords: str | None = None) -> dict[str, Manifold]:
-    """A bezel that lies on top of the map tile, covering `frame_overlap` mm of its edge."""
+    """A frame the tile drops into from the front and sits flush in ("stomp").
+
+    Frame and tile base are equally thick, so both faces are flush. The opening is the tile
+    outline plus `fit_clearance`, narrowing at the back along a 45-degree seat that matches
+    the bevel under the tile's edge and stops it falling through.
+    """
     fw = opts.frame_width
-    opening = inset(tile_outline(opts), opts.frame_overlap, _join(opts))
+    tile = tile_outline(opts)
+    opening = tile.buffer(opts.fit_clearance, join_style=_join(opts))
     minx, miny, maxx, _ = opening.bounds
     label = label if opts.text else None
     coords = coords if opts.coordinates else None
@@ -369,7 +404,11 @@ def build_frame(opts: Options, label: str | None, coords: str | None = None) -> 
         text_box = (pw - 6, ph * 0.62, top - fw / 2 - ph / 2)
     outer = round_corners(outer, opts.border_radius)
     t = opts.frame_thickness
-    body = extrude(outer.difference(opening), 0, t)
+    if opts.seat:
+        cutter = seated_solid(tile, t + 1, opts.seat, opts.fit_clearance, _join(opts))
+        body = extrude(outer, 0, t) - cutter.translate((0, 0, -0.01))
+    else:
+        body = extrude(outer.difference(opening), 0, t)
     if text_box is None:
         return {"frame": body}
 

@@ -78,6 +78,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--pin", action=argparse.BooleanOptionalAction, default=d.pin,
                    help="Add a raised map pin with a house icon at the address")
     g.add_argument("--pin-size", type=float, default=d.pin_size, help="Pin head diameter, mm")
+    g.add_argument("--pin-height", type=float, default=d.pin_height, help="Pin height above the base, mm")
     g.add_argument("--add-pin", action="append", default=[], metavar="ADDRESS",
                    help="Extra pin (address or 'lat,lon'); repeat for several. Must fall on the tile.")
     g.add_argument("--route", choices=("none", "straight", "walk", "bike", "drive"), default="none",
@@ -96,9 +97,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     g.add_argument("--border-radius", type=float, default=d.border_radius,
                    help="Corner radius of the frame (or of the tile when --no-frame), mm")
     g.add_argument("--frame-width", type=float, default=d.frame_width, help="Frame side width, mm")
-    g.add_argument("--frame-overlap", type=float, default=d.frame_overlap,
-                   help="How far the frame covers the tile edge, mm")
-    g.add_argument("--frame-thickness", type=float, default=d.frame_thickness, help="Frame thickness, mm")
+    g.add_argument("--seat-width", type=float, default=d.seat_width,
+                   help="Width of the 45-degree bevel under the tile edge that rests on the frame, mm")
+    g.add_argument("--fit-clearance", type=float, default=d.fit_clearance,
+                   help="Gap between tile edge and frame opening, per side, mm")
     g.add_argument("--text", action=argparse.BooleanOptionalAction, default=d.text,
                    help="Put the address text on the frame")
     g.add_argument("--label", help="Custom frame text (default: the address as given)")
@@ -119,6 +121,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--format", choices=("both", "3mf", "stl"), default="both",
                    help="3MF keeps each layer as a coloured part of one object, ready for multi-colour "
                         "printing; STL is single-part meshes")
+    p.add_argument("--layout", choices=("assembled", "plate"), default="assembled",
+                   help="3MF layout: assembled = tile seated in the frame as one object, "
+                        "plate = pieces side by side")
     p.add_argument("--preview", action=argparse.BooleanOptionalAction, default=True,
                    help="Also save a coloured top-down PNG preview of the assembled result")
     p.add_argument("--split", action="store_true",
@@ -132,8 +137,6 @@ def main(argv: list[str] | None = None) -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
     a = parse_args(argv)
     opts = Options(**{k: getattr(a, k) for k in Options.__dataclass_fields__ if hasattr(a, k)})
-    if not opts.frame:
-        opts.frame_overlap = 0.0
     if opts.base_height < opts.min_base_for_mount():
         opts.base_height = round(opts.min_base_for_mount(), 2)
         print(f"Note: base thickened to {opts.base_height} mm to fit the {opts.mount} mount")
@@ -191,19 +194,31 @@ def main(argv: list[str] | None = None) -> None:
     coloured = {piece: {k: (m, COLORS.get(k, "#808080")) for k, m in parts.items()}
                 for piece, parts in pieces.items()}
     stand_offset = (0.0, -opts.size / 2 - opts.text_strip - 40)
+    assembled = assemble(coloured, opts)
     if want_3mf:
-        # Place the frame next to the tile so both fit on the plate without overlapping.
-        offsets = {"frame": (opts.size + 2 * opts.frame_width + 10, 0.0), "stand": stand_offset}
         path = out / f"{name}.3mf"
-        written.append((path, write_3mf(coloured, path, offsets)))
+        if a.layout == "assembled":
+            written.append((path, write_3mf(assembled, path, {"stand": stand_offset})))
+        else:  # frame next to the tile so both fit on the plate without overlapping
+            offsets = {"frame": (opts.size + 2 * opts.frame_width + 10, 0.0), "stand": stand_offset}
+            written.append((path, write_3mf(coloured, path, offsets)))
     if a.preview:
-        # Assembled view: the frame sits on the tile, as it will once glued.
-        path = render_preview(coloured, out / f"{name}-preview.png", {"stand": stand_offset})
+        path = render_preview(assembled, out / f"{name}-preview.png", {"stand": stand_offset})
         written.append((path, None))
 
     print(f"Done in {time.perf_counter() - t0:.1f}s:")
     for path, ntri in written:
         print(f"  {path}" + (f"  ({ntri:,} triangles)" if ntri is not None else ""))
+
+
+def assemble(coloured: dict, opts: Options) -> dict:
+    """Seat the tile in the frame: one object whose parts keep their assembled positions."""
+    if "frame" not in coloured:
+        return coloured
+    parts = dict(coloured["map"])
+    parts.update({f"frame-{k}" if k in parts else k: v for k, v in coloured["frame"].items()})
+    rest = {k: v for k, v in coloured.items() if k not in ("map", "frame")}
+    return {"assembly": parts, **rest}
 
 
 def _save(mesh, path: Path) -> tuple[Path, int]:

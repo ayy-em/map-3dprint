@@ -8,9 +8,9 @@ You give it an address and get:
 | File | What it is |
 |---|---|
 | `<name>-map.stl` | Map tile: base plate with raised roads, footpaths, parks, railways and buildings, and water recessed into the base. Optional pins, route and hanging cavities. |
-| `<name>-frame.stl` | Bezel that lies on top of the tile's edge. The bottom strip carries the address and, optionally, coordinates, a compass and a scale bar. |
+| `<name>-frame.stl` | Frame the tile drops into from the front and sits flush in, like a *stomp* door in its *kozijn*: a 45° bevel under the tile's edge rests on a matching seat in the frame. Frame and base plate are equally thick, so front and back are both flush and the assembly lies flat on the build plate. The bottom strip carries the address and, optionally, coordinates, a compass and a scale bar. |
 | `<name>-stand.stl` | With `--mount stand`: a desk stand that holds the frame's bottom edge. |
-| `<name>.3mf` | Every piece in one file. Each layer is a separate coloured part of its object, so you can assign a filament per part in Bambu Studio, OrcaSlicer or PrusaSlicer. |
+| `<name>.3mf` | Every piece in one file, by default with the tile seated in the frame. Each layer is a separate coloured part, so you can assign a filament per part in Bambu Studio, OrcaSlicer or PrusaSlicer. |
 | `<name>-preview.png` | Coloured top-down render of the assembled result, so you can check it before slicing. |
 | `<name>-map-*.stl`, `<name>-frame-*.stl` | With `--split`: each layer as its own STL. They share a coordinate system, so load them as parts of one object. |
 
@@ -47,16 +47,17 @@ Files are written to `./output/` unless you pass `-o`. To list every option, run
 | `--shape` | square | `square`, `circle`, `hexagon` or `heart`. The frame follows the shape; non-square frames get a text plaque underneath. |
 | `--rotate` | 0 | Turn the map counter-clockwise by this many degrees. The compass follows. |
 | `--building-heights` | flat | `flat` makes every building `--building-height` tall. `real` uses OSM `height` or `building:levels` at map scale, and untagged buildings get the local median. |
-| `--height-scale`, `--max-building-height` | 1.0 / 8 | Vertical exaggeration and height cap for `real` |
+| `--height-scale`, `--max-building-height` | 1.0 / 12 | Vertical exaggeration and height cap for `real` |
 | `--parks / --no-parks` | on | Thin raised layer for parks, gardens, woods and grass |
 | `--railways / --no-railways` | on | Above-ground railway lines |
-| `--base-height`, `--road-height`, `--path-height`, `--building-height`, `--park-height`, `--rail-height` | 1.2 / 1.0 / 0.6 / 2.4 / 0.4 / 0.8 | Layer heights, mm |
+| `--base-height`, `--road-height`, `--path-height`, `--building-height`, `--park-height`, `--rail-height` | 2.4 / 1.2 / 0.8 / 3.6 / 0.6 / 1.0 | Layer heights, mm. `--water-depth` (0.8) sets how far water is recessed. |
 
 ### Pins and routes
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--pin / --no-pin` | off | Raised pin with a house cut-out, tip on the address |
+| `--pin-size`, `--pin-height` | 9 / 4.5 | Pin head diameter and height above the base, mm |
 | `--add-pin ADDRESS` | | Extra pin with a dot cut-out, given as an address or `lat,lon`. Repeat it for more stops. Stops outside the tile are skipped with a warning. |
 | `--route` | none | `straight`, `walk`, `bike` or `drive`. Draws a raised line from the main address through the stops in order, using routing from [routing.openstreetmap.de](https://routing.openstreetmap.de). |
 
@@ -66,11 +67,12 @@ Files are written to `./output/` unless you pass `-o`. To list every option, run
 |---|---|---|
 | `--frame / --no-frame` | on | Generate the frame |
 | `--border-radius` | 6 | Corner radius of the frame. With `--no-frame` it rounds the tile instead. |
-| `--frame-overlap` | 3 | How far the frame covers the tile edge, mm. The tile is left flat under it. |
+| `--seat-width` | 1.2 | Width of the 45° bevel under the tile edge that rests on the frame, mm. It's reduced automatically if the base is too thin under water. |
+| `--fit-clearance` | 0.2 | Gap between the tile edge and the frame opening, per side, mm. Raise it if the tile is too tight to drop in. |
 | `--text / --no-text` | on | Put the address on the frame |
 | `--label` | the address | Custom frame text. Long text wraps onto two lines at a comma. |
 | `--text-style` | emboss | `emboss` gives raised letters, `deboss` carves them in, and `flush` makes an inlay part level with the surface (meant for a second colour) |
-| `--text-height` | 0.8 | Relief height (emboss) or depth (deboss/flush), mm |
+| `--text-height` | 1.0 | Relief height (emboss) or depth (deboss/flush), mm |
 | `--coordinates` | off | Second line with the latitude and longitude |
 | `--compass`, `--scale-bar` | off | Compass rose on the left of the strip, and a scale bar with a round distance on the right |
 
@@ -78,7 +80,7 @@ Files are written to `./output/` unless you pass `-o`. To list every option, run
 
 | Option | Meaning |
 |---|---|
-| `--mount keyhole` | Two keyhole slots in the back of the tile for hanging on screws. The base is thickened to 4 mm. |
+| `--mount keyhole` | Two keyhole slots in the back of the tile for hanging on screws. The base is thickened to 4 mm. Hung up, the tile's bevel holds the frame against the wall. |
 | `--mount magnets` | Up to four pockets in the back of the tile for `--magnet-diameter` × `--magnet-thickness` magnets (default 10 × 2 mm). The base is thickened to fit them. |
 | `--mount stand` | A separate desk stand with a slot that holds the frame's bottom edge at a 15° lean |
 
@@ -87,6 +89,7 @@ Files are written to `./output/` unless you pass `-o`. To list every option, run
 | Option | Default | Meaning |
 |---|---|---|
 | `--format` | both | `3mf`, `stl` or `both` |
+| `--layout` | assembled | 3MF layout. `assembled` seats the tile in the frame as one object, both flat on the plate. `plate` puts the pieces side by side. |
 | `--preview / --no-preview` | on | PNG preview |
 | `--split` | off | Also export the layers as separate STLs |
 
